@@ -1,7 +1,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include <Wire.h>
 #include <Arduino.h>
+#include <Wire.h>
+#define PCF8574_LOW_LATENCY
+#include "PCF8574.h"
 #include <Adafruit_ADS1X15.h>
 
 
@@ -18,58 +20,62 @@
 // GPIO 22 (SCL)
 // To change I2C pins
 // Wire.begin(SDA, SCL);
+/* ADC address */
+#define ADC_I2C_ADDRESS 0x48
 // ############## Rotary encoder constants ################
-/* The shift register latch pin for rotary encoders */
-#define ROTARY_ENCODER_LOAD_PIN 27
-/* The shift register clock in pin for rotary encoders */
-#define ROTARY_ENCODER_SHIFT_PIN 26
-/* The pin that reads DT pin from the rotary encoders */
-#define ROTARY_ENCODER_CLK_READ_PIN 4
-/* The pin that reads CLK pin from the rotary encoders */
-#define ROTARY_ENCODER_DT_READ_PIN 16
-/* The interrupt pin used to trigger rotary encoder reading */
-#define ENC_DT_INT_PIN 33
+// Addresses go from 0x38 to 0x3F
+/* I2C address for rotary encoder 0 to 3 using PCF8574 shifter */
+#define ENCODER_I2C_ADDRESS_0 0x20
+/* Interrupt pin for encoder CLK PCF8574 shifter 0 */
+#define ENC_INT_PIN_0_TO_3 32
+/* The id of the PCF chip that handles encoders 0 to 4. Used in task notification value */
+#define PCF_ID_ENC_0_TO_3 0
+/* I2C address for rotary encoder 4 to 7 using PCF8574 shifter */
+#define ENCODER_I2C_ADDRESS_1 0x21
+/* Interrupt pin for encoder CLK PCF8574 shifter 1 */
+#define ENC_INT_PIN_4_TO_7 26
+/* The id of the PCF chip that handles encoders 5 to 8. Used in task notification value */
+#define PCF_ID_ENC_4_TO_7 1
+/* I2C address for rotary encoder 8 to 9 using PCF8574 shifter */
+#define ENCODER_I2C_ADDRESS_2 0x22
+/* Interrupt pin for encoder DT PCF8574 shifter 0 */
+#define ENC_INT_PIN_8_TO_9 33
+/* The id of the PCF chip that handles encoders 5 to 8. Used in task notification value */
+#define PCF_ID_ENC_8_TO_9 2
+
 // ################# Buttons constants ###################
-/* The shift register latch pin for buttons */
-#define BUTTON_LOAD_PIN 23
-/* The clock signal used to shift data out of the register. 
-The clockEnablePin must be set to low to enable the shifting of data. */
-#define BUTTON_SHIFT_PIN 13
-/* The pin used to read base buttons data */
-#define BUTTON_BASE_READ_PIN 25
-/* The pin used to read base buttons data */
-#define BUTTON_OTHER_READ_PIN 34
-/* The interrupt pin used to trigger button value reading */
-#define BUTTON_INT_PIN 32
+/* I2C address for base buttons 0 to 8 PCF8574 shifter */
+#define BUTTONS_ADDRESS_0 0x23
+/* Interrupt pin for buttons 0 to 8 PCF8574 shifter */
+#define BUTTONS_INT_PIN_0 33
+/* I2C address for base buttons 9 to 16 PCF8574 shifter */
+#define BUTTONS_ADDRESS_1 0x24
+/* Interrupt pin for buttons 9 to 16 PCF8574 shifter */
+#define BUTTONS_INT_PIN_1 33
+/* I2C address for base buttons 17 to 24 PCF8574 shifter */
+#define BUTTONS_ADDRESS_2 0x25
+/* Interrupt pin for buttons 17 to 24 PCF8574 shifter */
+#define BUTTONS_INT_PIN_2 33
 // ------------------------------------------------------------------
 // ######################## NB CONTROLE ELEMENTS ####################
 // ------------------------------------------------------------------
 // ######## Number of input elements constants ##########
 /* The number of rotary encoders to be read */
-#define NB_ROTARY_ENCODERS 2
+#define NB_ROTARY_ENCODERS 10
 /* Number of variable resistors */
 #define NB_VARIABLE_RESISTORS 2
 /* Number of joysticks */
 #define NB_JOYSTICKS 1
 /* Number of buttons */
 #define NB_BASE_BUTTONS 3
-/* The total number of shifts to be executed when reading buttons.
-   Depends on the max number of shift registers in series for all clickables.
-*/
-#define NB_BUTTON_SHIFTS 3 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 /* The total number of pressable elements */
 const int NB_TOTAL_BUTTONS = NB_BASE_BUTTONS + NB_ROTARY_ENCODERS + NB_JOYSTICKS;
 // ################ General constants ###################
 #define NB_CONTROLE_ELEMENT_TYPES 4
+
 // ------------------------------------------------------------------
-// ######################## MODEL VARIABLES #########################
-// ------------------------------------------------------------------
-// ################# Buttons vars #######################
-/* Array containing the current value for each button */
-bool buttonValues[NB_BASE_BUTTONS] = {0};
-/* The handle for the task responsible for reading the buttons */
-TaskHandle_t readButtonsTaskHandle = NULL;
 // ################## variable resistor vars ########################
+// ------------------------------------------------------------------
 /* The difference between the past recoded value and the presently read value
     before recording a value change. Only applied to variable resistors.
 */
@@ -113,11 +119,72 @@ int16_t joystickValues[NB_JOYSTICKS][2];
 const uint8_t muxAdcJoystickMap[NB_JOYSTICKS][2][2] = {
   {{0, 2}, {0, 3}}
 };
-// ################# rotary encoder vars #################
+// ------------------------------------------------------------------
+// ####################### ROTARY ENCODER VARS ######################
+// ------------------------------------------------------------------
+/* Array containing the PCF8574 pins each of the rotary encoder A pins are connected to. */
+const int encoderAPins[NB_ROTARY_ENCODERS] = {
+  P0,
+  P2,
+  P4,
+  P6,
+  P0,
+  P2,
+  P4,
+  P6,
+  P0,
+  P2,
+};
+
+
+/* Array containing the PCF8574 pins each of the rotary encoder B pins are connected to. */
+const int encoderBPins[NB_ROTARY_ENCODERS] = {
+  P1,
+  P3,
+  P5,
+  P7,
+  P1,
+  P3,
+  P5,
+  P7,
+  P1,
+  P3,
+};
+
+
+void ICACHE_RAM_ATTR updateEncoder0To3();
+void ICACHE_RAM_ATTR updateEncoder4To7();
+void ICACHE_RAM_ATTR updateEncoder8To9();
+
+
+// Initialize the PCF8574 library with the I2C addresses, interrupt pins, and ISRs
+PCF8574 pcfEncoder0(ENCODER_I2C_ADDRESS_0, ENC_INT_PIN_0_TO_3, updateEncoder0To3);
+PCF8574 pcfEncoder1(ENCODER_I2C_ADDRESS_0, ENC_INT_PIN_0_TO_3, updateEncoder0To3);
+PCF8574 pcfEncoder2(ENCODER_I2C_ADDRESS_0, ENC_INT_PIN_0_TO_3, updateEncoder0To3);
+PCF8574 pcfEncoder3(ENCODER_I2C_ADDRESS_0, ENC_INT_PIN_0_TO_3, updateEncoder0To3);
+PCF8574 pcfEncoder4(ENCODER_I2C_ADDRESS_1, ENC_INT_PIN_4_TO_7, updateEncoder4To7);
+PCF8574 pcfEncoder5(ENCODER_I2C_ADDRESS_1, ENC_INT_PIN_4_TO_7, updateEncoder4To7);
+PCF8574 pcfEncoder6(ENCODER_I2C_ADDRESS_1, ENC_INT_PIN_4_TO_7, updateEncoder4To7);
+PCF8574 pcfEncoder7(ENCODER_I2C_ADDRESS_1, ENC_INT_PIN_4_TO_7, updateEncoder4To7);
+PCF8574 pcfEncoder8(ENCODER_I2C_ADDRESS_2, ENC_INT_PIN_8_TO_9, updateEncoder8To9);
+PCF8574 pcfEncoder9(ENCODER_I2C_ADDRESS_2, ENC_INT_PIN_8_TO_9, updateEncoder8To9);
+/* Reference array for PCF encoder objects. */
+PCF8574 pcfEncoders[NB_ROTARY_ENCODERS] = {
+  pcfEncoder0,
+  pcfEncoder1,
+  pcfEncoder2,
+  pcfEncoder3,
+  pcfEncoder4,
+  pcfEncoder5,
+  pcfEncoder6,
+  pcfEncoder7,
+  pcfEncoder8,
+  pcfEncoder9,
+};
 /* The value of the currently polled rotary encoder DT channel  */
 int rotaryEncoderDtCurrent = 0;
 /* The counters for each rotary encoder */
-int encoderCounters[NB_ROTARY_ENCODERS] = {0};
+volatile long encoderCounters[NB_ROTARY_ENCODERS] = {0};
 /* Array containing the last recorded value for all the CLK pins */
 int dtLastState[NB_ROTARY_ENCODERS] = {0};
 /* The handle for the task responsible for reading the rotary encoders */
@@ -144,8 +211,8 @@ uint8_t messageLenOut = 0;
 /* Struct representing the a message in the outputted message queue */
 typedef struct {
     uint8_t elementId;
-    int message;
-} EncoderMsg;
+    long message;
+} ElementMsg;
 /* The queue containing the message to be sent */
 QueueHandle_t messageOutQueue;
 /* Flag indicating if a task that needs to be run */
@@ -154,69 +221,26 @@ BaseType_t xHigherPriorityTaskWoken;
    Only one buffer should be needed as there is only one piece of code
    that read the mesage queue.
 */
-EncoderMsg messageReadBuffer;
+ElementMsg messageReadBuffer;
+/* The handle for the task responsible for reading the buttons */
+TaskHandle_t readButtonsTaskHandle = NULL;
 
-// Right turn: 00 -> 10 -> | 11 --> 01 -> 00
-// Left turn:  00 -> | 01 -> 11 --> 10 -> 00
-// Quadrature lookup table for state transitions
-/*
-static const int8_t rotaryEncoderTransitionTable[16] = {
-    0, -1, 1,  0,
-   1,  0,  0, 1,
-   -1,  0,  0, 1,
-    0, 1, -1,  0
-};
-*/
-
-
-// ---------------------------------------------------------------------
-// ######################## DECLARING FUNCTIONS ########################
-// ---------------------------------------------------------------------
+// Forward declaration of the interrupt service routine
+void addToMessageQueue(uint8_t elementId, int message);
+void readRotaryEncodersTask(void *param);
+void readVariableResistorAndJoystickTask(void *param);
+void setupEncoders();
 void selectChannel(uint8_t channel);
 void setupVariableResistors();
 void setupJoysticks();
 void setupControleElementIds();
-void addToMessageQueue(uint8_t elementId, int message);
 void readVariableResistorsAndJoysticks();
-void readVariableResistorAndJoystickTask(void *param);
-void readRotaryEncoderShiftRegisters();
-void readRotaryEncodersTask(void *param);
-void IRAM_ATTR readRotaryEncoderISR();
-void readAllButtonsTask(void *param);
-void readButtonShiftRegisters();
-void IRAM_ATTR readAllButtonsISR();
+void listAvailableI2CAddresses();
 
-
-// ---------------------------------------------------------------------
-// ############################## SETUP ###############################
-// ---------------------------------------------------------------------
 void setup(){
-  Serial.begin(115200);
+  Serial.begin (115200);
   // ############### Setup outputted message queue ################
-  messageOutQueue = xQueueCreate(100, sizeof(EncoderMsg));
-  // ####################### Setup Buttons ########################
-  pinMode(BUTTON_LOAD_PIN, OUTPUT);
-  pinMode(BUTTON_SHIFT_PIN, OUTPUT);
-  pinMode(BUTTON_BASE_READ_PIN, INPUT);
-  pinMode(BUTTON_OTHER_READ_PIN, INPUT);
-  pinMode(BUTTON_INT_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(BUTTON_INT_PIN), readAllButtonsISR, CHANGE);
-  // ######################### Setup MUX ##########################
-  pinMode(MUX_S0_PIN, OUTPUT);
-  pinMode(MUX_S1_PIN, OUTPUT);
-  pinMode(MUX_S2_PIN, OUTPUT);
-  pinMode(MUX_S3_PIN, OUTPUT);
-  // ############ Setup rotary encoder shift registers #############
-  pinMode(ROTARY_ENCODER_LOAD_PIN, OUTPUT);
-  pinMode(ROTARY_ENCODER_SHIFT_PIN, OUTPUT);
-  pinMode(ROTARY_ENCODER_CLK_READ_PIN, INPUT);
-  pinMode(ROTARY_ENCODER_DT_READ_PIN, INPUT);
-  // ############ Make sure that pins start correct ################ 
-  digitalWrite(ROTARY_ENCODER_LOAD_PIN, HIGH);
-  digitalWrite(ROTARY_ENCODER_SHIFT_PIN, LOW);
-  // ############ Setup rotary encoder interrupt ###################
-  pinMode(ENC_DT_INT_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENC_DT_INT_PIN), readRotaryEncoderISR, CHANGE);
+  messageOutQueue = xQueueCreate(100, sizeof(ElementMsg));
   // ############# ADC setup #############
   Wire.begin(); // I2C library for ADC
   if (!ads.begin()) {
@@ -228,7 +252,14 @@ void setup(){
   setupVariableResistors();
   setupJoysticks();
   setupControleElementIds();
-  // ######################## Start tasks #########################
+  setupEncoders();
+  //listAvailableI2CAddresses();
+  //pcfEncoder8.encoder(encoder0PinA, encoder0PinB);
+  //pcfEncoder9.encoder(encoder0PinA, encoder0PinB);
+  // Set the encoder button pin as an input
+  // pcfEncoder0.pinMode(P2, INPUT);
+
+  
   // Create the high priority read rotary encoder task
   xTaskCreatePinnedToCore(
       readRotaryEncodersTask,
@@ -241,6 +272,7 @@ void setup(){
       0
   );
   // Create the reading variable resistor and joystick task
+  /*
   xTaskCreatePinnedToCore(
       readVariableResistorAndJoystickTask,
       "ReadVariableResistorsAndJoysticksTask",
@@ -250,21 +282,21 @@ void setup(){
       &readVariableResistorsAndJoysticksTaskHandle,
       0
   );
+  */
   // Create the reading buttons task
-  xTaskCreatePinnedToCore(
-      readAllButtonsTask,
-      "ReadButtonsTask",
-      4096,
-      NULL,
-      1,  // Normal priority
-      &readButtonsTaskHandle,
-      0
-  );
+  //xTaskCreatePinnedToCore(
+  //    readAllButtonsTask,
+  //    "ReadButtonsTask",
+  //    4096,
+  //    NULL,
+  //    1,  // Normal priority
+  //    &readButtonsTaskHandle,
+  //    0
+  //);
 }
 
-// ---------------------------------------------------------------------
-// ############################### LOOP ################################
-// ---------------------------------------------------------------------
+int debugPrintFlag = -1;
+
 void loop(){
   // If there is a message in the queue print until empty
   if(uxQueueMessagesWaiting(messageOutQueue) > 0){
@@ -278,7 +310,7 @@ void loop(){
         Serial.println("Failed to read message from message out queue!");
       }
     }
-  }     
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -337,6 +369,73 @@ void setupControleElementIds(){
   //return out;
 }
 
+/**
+ * Function called to setup all rotary encoders.
+ */
+void setupEncoders(){
+  Serial.println("Initializing rotary encoders...");
+  for(int i=0;i<NB_ROTARY_ENCODERS;i++){
+    if(!pcfEncoders[i].begin()){
+      Serial.print("Error when connecting to rotary encoder: ");
+      Serial.println(i);
+    }
+  }
+  delay(500);
+  for(int i=0;i<NB_ROTARY_ENCODERS;i++){
+    pcfEncoders[i].encoder(encoderAPins[i], encoderBPins[i]);
+  }
+}
+
+
+// Interrupt Service Routine for rotary encoders 0 to 3 (ISR)
+void updateEncoder0To3(){
+   //ets_printf("Triggered interrupt!");
+   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xTaskNotifyFromISR(
+      readEncodersTaskHandle,
+      PCF_ID_ENC_0_TO_3,
+      eSetBits, // Indicates what to do with the notification value.
+      &xHigherPriorityTaskWoken
+    );
+    if (xHigherPriorityTaskWoken) {
+      //ets_printf("Switching context!\n");
+      portYIELD_FROM_ISR();
+    }
+}
+
+// Interrupt Service Routine for rotary encoders 4 to 7 (ISR)
+void updateEncoder4To7(){
+   //ets_printf("Triggered interrupt!");
+   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xTaskNotifyFromISR(
+      readEncodersTaskHandle,
+      PCF_ID_ENC_4_TO_7,
+      eSetBits,
+      &xHigherPriorityTaskWoken
+    );
+    if (xHigherPriorityTaskWoken) {
+      //ets_printf("Switching context!\n");
+      portYIELD_FROM_ISR();
+    }
+}
+
+// Interrupt Service Routine for rotary encoders 8 to 9 (ISR)
+void updateEncoder8To9(){
+   //ets_printf("Triggered interrupt 8 to 9!\n");
+   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xTaskNotifyFromISR(
+      readEncodersTaskHandle,
+      PCF_ID_ENC_8_TO_9,
+      eSetBits,
+      &xHigherPriorityTaskWoken
+    );
+    if (xHigherPriorityTaskWoken) {
+      //ets_printf("Switching context!\n");
+      portYIELD_FROM_ISR();
+    }
+}
+
+
 // ---------------------------------------------------------------------
 // ######################### GENERAL FUNCTIONS #########################
 // ---------------------------------------------------------------------
@@ -345,8 +444,8 @@ void setupControleElementIds(){
  * @param elementId The controle element id of the controle element sending a message.
  * @param message The message to be added to the queue.
  */
-void addToMessageQueue(uint8_t elementId, int message){
-    EncoderMsg msgOut;
+void addToMessageQueue(uint8_t elementId, long message){
+    ElementMsg msgOut;
     msgOut.elementId = elementId;
     msgOut.message = message;
     if(xQueueGenericSend(messageOutQueue, &msgOut, (TickType_t) 10, queueSEND_TO_BACK) != pdPASS){
@@ -356,39 +455,16 @@ void addToMessageQueue(uint8_t elementId, int message){
     }
 }
 
-// ---------------------------------------------------------------------
-// ########################## BUTTON FUNCTIONS #########################
-// ---------------------------------------------------------------------
-
 /**
- * The function in charge of shifting in the button values from the
- * shift registers, recording values and adding to the message queue
- * when appropriate.
+ * Scans all possible I2C addresses and prints all addresses with a device.
  */
-void readButtonShiftRegisters(){
-  static bool buttonBaseReadBuffer = 0;
-  static bool buttonOtherReadBuffer = 0;
-  //ets_printf("Reading shift registers.\n");
-  GPIO.out_w1tc = ((uint32_t)1 << BUTTON_LOAD_PIN); // Set pin low fast
-  delayMicroseconds(1); // This delay seems to improve reading.
-  GPIO.out_w1ts = ((uint32_t)1 << BUTTON_LOAD_PIN); // Set pin high fast
-  for (int i = 0; i < NB_BUTTON_SHIFTS; i++) {
-    buttonBaseReadBuffer = (GPIO.in >> BUTTON_BASE_READ_PIN) & 0x1;
-    buttonOtherReadBuffer = (GPIO.in1.val >> (BUTTON_OTHER_READ_PIN - 32)) & 0x1;
-    // Only if different than old value
-    if(buttonValues[i] != buttonBaseReadBuffer){
-      buttonValues[i] = buttonBaseReadBuffer;
-      addToMessageQueue(controleElementIds[3][i], (int)buttonBaseReadBuffer);
+void listAvailableI2CAddresses(){
+  for (byte addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Device found at 0x");
+      Serial.println(addr, HEX);
     }
-    // Only if within range and different than previous
-    if((i < (NB_ROTARY_ENCODERS + NB_JOYSTICKS)) & (buttonValues[i + NB_BASE_BUTTONS] != buttonOtherReadBuffer)){
-      buttonValues[i + NB_BASE_BUTTONS] = buttonOtherReadBuffer;
-      addToMessageQueue(controleElementIds[3][i + NB_BASE_BUTTONS], (int)buttonOtherReadBuffer);
-    }
-    // Shift out the next bit to QH
-    GPIO.out_w1ts = ((uint32_t)1 << BUTTON_SHIFT_PIN); // Set pin high fast
-    delayMicroseconds(1);
-    GPIO.out_w1tc = ((uint32_t)1 << BUTTON_SHIFT_PIN); // Set pin low fast
   }
 }
 
@@ -396,31 +472,39 @@ void readButtonShiftRegisters(){
  * The function responsable for dealing with reading the rotary encoders.
  * @param param ?????
  */
-void readAllButtonsTask(void *param){
-    while (true) {
+void readRotaryEncodersTask(void *param){
+    while(true){
+      uint32_t pcfId;
       // Wait for signal from ISR to unblock task
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        readButtonShiftRegisters();
-    }
-}
-
-/**
- * The ISR triggered by the changing of a button value
- * of any clickable controle element. Note that if 2 buttons
- * are pressed and one of them is released it will not be
- * detected due to the the shared line still being heigh.
- */
-void IRAM_ATTR readAllButtonsISR(){
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xTaskNotifyFromISR(
-      readButtonsTaskHandle,
-      0,
-      eNoAction,
-      &xHigherPriorityTaskWoken
-    );
-    if (xHigherPriorityTaskWoken) {
-      //ets_printf("Switching context!\n");
-      portYIELD_FROM_ISR();
+      //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+      xTaskNotifyWait(0, 0, &pcfId, portMAX_DELAY);
+      // TODO: Add specific flag for each task or fix notification value signaling
+      //Serial.print("Task notified: ");Serial.println(pcfId);
+      switch (pcfId){
+        case PCF_ID_ENC_0_TO_3:
+          for(int i=0;i<4;i++){
+            if(pcfEncoders[i].readEncoderValue(encoderAPins[i], encoderBPins[i], &encoderCounters[i])){
+              addToMessageQueue(controleElementIds[2][i], encoderCounters[i]);
+            }
+          }
+          break;
+        case PCF_ID_ENC_4_TO_7:
+          for(int i=4;i<8;i++){
+            if(pcfEncoders[i].readEncoderValue(encoderAPins[i], encoderBPins[i], &encoderCounters[i])){
+              addToMessageQueue(controleElementIds[2][i], encoderCounters[i]);
+            }
+          }
+          break;
+        case PCF_ID_ENC_8_TO_9:
+          for(int i=8;i<10;i++){
+            if(pcfEncoders[i].readEncoderValue(encoderAPins[i], encoderBPins[i], &encoderCounters[i])){
+              addToMessageQueue(controleElementIds[2][i], encoderCounters[i]);
+            }
+          }
+          break;
+        default:
+          break;
+      }
     }
 }
 
@@ -446,7 +530,7 @@ void selectChannel(uint8_t channel){
  * as well as checking if significant change has happen between curent and past readings.
  * If readings are significantly different it sets the new value for the controle
  * element and places the appropriate message to the message output queue.
- */
+ *//*
 void readVariableResistorsAndJoysticks(){
   int16_t readBuffer = 0;
   for(uint8_t i=0;i<NB_VARIABLE_RESISTORS;i++){
@@ -455,7 +539,7 @@ void readVariableResistorsAndJoysticks(){
     readBuffer = ads.readADC_SingleEnded(muxAdcVariableResistorMap[i][0]);
     if(abs(readBuffer - variableResistorValues[i]) > VARIABLE_RESISTOR_ALLOWED_VARIANCE){
       variableResistorValues[i] = readBuffer;
-      addToMessageQueue(controleElementIds[0][i], variableResistorValues[i]);
+      addToMessageQueue((uint8_t)controleElementIds[0][i], variableResistorValues[i]);
     }
   }
   for(uint8_t i=0;i<NB_JOYSTICKS;i+=2){
@@ -465,17 +549,17 @@ void readVariableResistorsAndJoysticks(){
     if(abs(readBuffer - joystickValues[i][0]) > 2){
       //Serial.println(readBuffer);
       joystickValues[i][0] = readBuffer;
-      addToMessageQueue(controleElementIds[1][i], joystickValues[i][0]);
+      addToMessageQueue((uint8_t)controleElementIds[1][i], joystickValues[i][0]);
     }
     selectChannel(muxAdcJoystickMap[i][1][1]);
     readBuffer = ads.readADC_SingleEnded(muxAdcJoystickMap[i][1][0]);
     if(abs(readBuffer - joystickValues[i][1]) > 2){
       joystickValues[i][1] = readBuffer;
-      addToMessageQueue(controleElementIds[1][i + 1], joystickValues[i][1]);
+      addToMessageQueue((uint8_t)controleElementIds[1][i + 1], joystickValues[i][1]);
     }
   }
 }
-
+*/
 
 /**
  * The function responsable for dealing with reading the variable resistors
@@ -489,68 +573,41 @@ void readVariableResistorAndJoystickTask(void *param){
     }
 }
 
-// ---------------------------------------------------------------------
-// ###################### ROTARY ENCODER FUNCTIONS #####################
-// ---------------------------------------------------------------------
-
 /**
- * The function in charge of shifting in the rotary encoder values from the
- * shift registers, incrementing or decrementing the counter values as needed
- * and adding message to message queue.
- */
-void readRotaryEncoderShiftRegisters() {
-  //ets_printf("Reading shift registers.\n");
-  GPIO.out_w1tc = ((uint32_t)1 << ROTARY_ENCODER_LOAD_PIN); // Set pin low fast
-  delayMicroseconds(1); // This delay seems to improve reading.
-  GPIO.out_w1ts = ((uint32_t)1 << ROTARY_ENCODER_LOAD_PIN); // Set pin high fast
-  for (int i = 0; i < NB_ROTARY_ENCODERS; i++) {
-    rotaryEncoderDtCurrent = (GPIO.in >> ROTARY_ENCODER_DT_READ_PIN) & 0x1;
-    // If there is a minimal movement of 1 step
-    if ((dtLastState[i] == LOW) && (rotaryEncoderDtCurrent == HIGH)) {
-        if ((GPIO.in >> ROTARY_ENCODER_CLK_READ_PIN) & 0x1 == HIGH) {      // If Pin B is HIGH
-          encoderCounters[i] ++;
-          //ets_printf("i: %d, Counter: %d\n", i, encoderCounters[i]);        
-        } else {
-          encoderCounters[i] --;
-          //ets_printf("i: %d, Counter: %d\n", i, encoderCounters[i]);
-        }
-        // TODO: Set element id to reference table value.
-        addToMessageQueue(controleElementIds[2][i], encoderCounters[i]);
-      }
-      dtLastState[i] = rotaryEncoderDtCurrent;
-      // Shift out the next bit to QH
-      GPIO.out_w1ts = ((uint32_t)1 << ROTARY_ENCODER_SHIFT_PIN); // Set pin high fast
-      delayMicroseconds(1);
-      GPIO.out_w1tc = ((uint32_t)1 << ROTARY_ENCODER_SHIFT_PIN); // Set pin low fast
-    }
-}
-
-/**
- * The function responsable for dealing with reading the rotary encoders.
+ * The function responsable for dealing with reading the all buttons.
  * @param param ?????
  */
-void readRotaryEncodersTask(void *param){
-    while (true) {
+void readButtonsTask(void *param){
+    while(true){
+      static uint32_t pcfId = 10;
       // Wait for signal from ISR to unblock task
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        readRotaryEncoderShiftRegisters();
+      //ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+      xTaskNotifyWait(0, 0xFFFFFFFF, &pcfId, portMAX_DELAY);
+      switch (pcfId){
+        case PCF_ID_ENC_0_TO_3:
+          for(int i=0;i<4;i++){
+            if(pcfEncoders[i].readEncoderValue(encoderAPins[i], encoderBPins[i], &encoderCounters[i])){
+              addToMessageQueue((uint8_t)controleElementIds[2][i], encoderCounters[i]);
+            }
+          }
+          break;
+        case PCF_ID_ENC_4_TO_7:
+          for(int i=4;i<8;i++){
+            if(pcfEncoders[i].readEncoderValue(encoderAPins[i], encoderBPins[i], &encoderCounters[i])){
+              addToMessageQueue((uint8_t)controleElementIds[2][i], encoderCounters[i]);
+            }
+          }
+          break;
+        case PCF_ID_ENC_8_TO_9:
+          for(int i=8;i<10;i++){
+            if(pcfEncoders[i].readEncoderValue(encoderAPins[i], encoderBPins[i], &encoderCounters[i])){
+              addToMessageQueue((uint8_t)controleElementIds[2][i], encoderCounters[i]);
+            }
+          }
+          break;
+        default:
+          break;
+      }
     }
 }
 
-/**
- * The ISR triggered by the changing in the value of the DT value
- * of any of the rotary encoders.
- */
-void IRAM_ATTR readRotaryEncoderISR() {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xTaskNotifyFromISR(
-      readEncodersTaskHandle,
-      0,
-      eNoAction,
-      &xHigherPriorityTaskWoken
-    );
-    if (xHigherPriorityTaskWoken) {
-      //ets_printf("Switching context!\n");
-      portYIELD_FROM_ISR();
-    }
-}
